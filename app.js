@@ -3,17 +3,22 @@ import { CAMERAS } from './cameras.js';
 import { attachZoom } from './preview-zoom.js';
 import { freshColor, straightenScale, customOutputSize } from './advanced.js';
 import { setupAdvanced } from './advanced-ui.js';
+import { setupFolder } from './folder-ui.js';
+import { freshHealing, healPixels } from './healing.js';
+import { setupHealing } from './healing-ui.js';
 const $ = selector => document.querySelector(selector);
 const $$ = selector => [...document.querySelectorAll(selector)];
-const freshState = () => ({ preset: 'alpine', strength: 80, camera: null, cameraStrength: 75, adjustments: { ...DEFAULTS }, color: freshColor(), masks: [], ratio: 'original', cropX: 50, cropY: 50, rotation: 0, straighten: 0 });
+const freshState = () => ({ preset: 'alpine', strength: 80, camera: null, cameraStrength: 75, adjustments: { ...DEFAULTS }, color: freshColor(), masks: [], healing: freshHealing(), ratio: 'original', cropX: 50, cropY: 50, rotation: 0, straighten: 0 });
 let state = freshState();
 let source = null, rotated = null, sourceName = 'Alpine afternoon.png';
 let history = [], historyIndex = -1;
 let previewVersion = 0, previewTimer, rendering = false, renderAgain = false;
 let loading = false, loadVersion = 0, toastTimer, exportVersion = 0, exportURL;
-let exportBlob = null, exportFilename = '', jobId = 0;
+let exportBlob = null, exportFilename = '', exportFingerprint = '', jobId = 0;
 let heifTask = null;
-let advancedUI, previewGeometry = null;
+let advancedUI, healingUI, folderUI, previewGeometry = null;
+let healedSource = null, healedOriginal = null, healedKey = '';
+let healingTask = null, rotatedInput = null, rotatedKey = '';
 const pendingJobs = new Map();
 let worker;
 try {
@@ -30,12 +35,12 @@ try {
     pendingJobs.clear(); worker.terminate(); worker = null;
   };
 } catch { worker = null; }
-function pixelsInWorker(imageData, params) {
-  if (!worker) return Promise.resolve(new ImageData(processPixels(imageData.data, imageData.width, imageData.height, params), imageData.width, imageData.height));
+function pixelsInWorker(imageData, params, operation = 'edit') {
+  if (!worker) return Promise.resolve(new ImageData(operation === 'heal' ? healPixels(imageData.data, imageData.width, imageData.height, params.spots) : processPixels(imageData.data, imageData.width, imageData.height, params), imageData.width, imageData.height));
   return new Promise((resolve, reject) => {
     const id = ++jobId;
     pendingJobs.set(id, { resolve, reject });
-    worker.postMessage({ id, pixels: imageData.data.buffer, width: imageData.width, height: imageData.height, params }, [imageData.data.buffer]);
+    worker.postMessage({ id, pixels: imageData.data.buffer, width: imageData.width, height: imageData.height, params, operation }, [imageData.data.buffer]);
   });
 }
 function canvas(width, height) {
@@ -82,6 +87,7 @@ function syncControls() {
   $('#preview-status').title = $('#preview-status').textContent;
   updateHistory();
   advancedUI?.sync();
+  healingUI?.sync();
 }
 for (const group of GROUPS) {
   const details = document.createElement('details'); details.className = 'slider-group'; details.open = group.name === 'Light';
@@ -147,7 +153,7 @@ function cameraThumbnails() {
     $(`[data-camera="${profile.id}"] img`).src = thumbnail.toDataURL('image/jpeg', .86);
   }
 }
-$('#camera-open').addEventListener('click', () => { if (!source || loading) return; cameraThumbnails(); $('#camera-dialog').showModal(); });
+$('#camera-open').addEventListener('click', async () => { if (!source || loading) return; const photo = source; await ensureHealing(state); if (source !== photo || loading || folderUI?.busy) return; rebuildRotation(); cameraThumbnails(); $('#camera-dialog').showModal(); });
 $('#camera-done').addEventListener('click', () => $('#camera-dialog').close());
 $('#camera-brand').addEventListener('change', () => {
   const brand = $('#camera-brand').value;
@@ -157,33 +163,57 @@ function removeCamera() { state.camera = null; syncControls(); checkpoint(); req
 $('#camera-clear').addEventListener('click', removeCamera); $('#camera-neutral').addEventListener('click', removeCamera);
 $('#camera-strength').addEventListener('input', () => { state.cameraStrength = Number($('#camera-strength').value); syncControls(); requestPreview(); });
 $('#camera-strength').addEventListener('change', checkpoint);
+async function ensureHealing(snapshot) {
+  if (!source || !snapshot.healing.spots.some(spot => spot.strength > 0)) return;
+  const original = source, key = JSON.stringify(snapshot.healing.spots);
+  if (healedOriginal === original && healedKey === key) return;
+  if (healingTask?.original === original && healingTask.key === key) return healingTask.promise;
+  const task = { original, key };
+  task.promise = (async () => {
+    const pixels = original.getContext('2d').getImageData(0, 0, original.width, original.height);
+    const repaired = await pixelsInWorker(pixels, { spots: snapshot.healing.spots }, 'heal');
+    if (source !== original) return;
+    healedSource = canvas(original.width, original.height); healedSource.getContext('2d').putImageData(repaired, 0, 0);
+    healedOriginal = original; healedKey = key;
+  })();
+  healingTask = task;
+  try { await task.promise; } finally { if (healingTask === task) healingTask = null; }
+}
+function stopInteractions() { const a = advancedUI?.stopDrawing(), b = healingUI?.stopDrawing(); return a || b; }
+function rotatePhoto(input, snapshot) {
+  const swap = snapshot.rotation % 180 !== 0;
+  let output = canvas(swap ? input.height : input.width, swap ? input.width : input.height);
+  const ctx = output.getContext('2d'); ctx.translate(output.width / 2, output.height / 2); ctx.rotate(snapshot.rotation * Math.PI / 180); ctx.drawImage(input, -input.width / 2, -input.height / 2);
+  if (snapshot.straighten) {
+    const oriented = output;
+    output = canvas(oriented.width, oriented.height);
+    const ctx = output.getContext('2d'), scale = straightenScale(oriented.width, oriented.height, snapshot.straighten);
+    ctx.imageSmoothingQuality = 'high'; ctx.translate(output.width / 2, output.height / 2); ctx.rotate(snapshot.straighten * Math.PI / 180); ctx.scale(scale, scale); ctx.drawImage(oriented, -oriented.width / 2, -oriented.height / 2);
+  }
+  return output;
+}
 function rebuildRotation() {
   if (!source) return;
-  const swap = state.rotation % 180 !== 0;
-  rotated = canvas(swap ? source.height : source.width, swap ? source.width : source.height);
-  const ctx = rotated.getContext('2d'); ctx.translate(rotated.width / 2, rotated.height / 2); ctx.rotate(state.rotation * Math.PI / 180); ctx.drawImage(source, -source.width / 2, -source.height / 2);
-  if (state.straighten) {
-    const oriented = rotated;
-    rotated = canvas(oriented.width, oriented.height);
-    const ctx = rotated.getContext('2d'), scale = straightenScale(oriented.width, oriented.height, state.straighten);
-    ctx.imageSmoothingQuality = 'high'; ctx.translate(rotated.width / 2, rotated.height / 2); ctx.rotate(state.straighten * Math.PI / 180); ctx.scale(scale, scale); ctx.drawImage(oriented, -oriented.width / 2, -oriented.height / 2);
-  }
+  const working = healedOriginal === source && healedKey === JSON.stringify(state.healing.spots) ? healedSource : source, key = `${state.rotation}:${state.straighten}`;
+  if (rotatedInput === working && rotatedKey === key) return;
+  rotated = rotatePhoto(working, state); rotatedInput = working; rotatedKey = key;
 }
 function photoGeometry(snapshot, rect) {
   return { sourceWidth: source.width, sourceHeight: source.height, width: rotated.width, height: rotated.height, rect, rotation: snapshot.rotation, straighten: snapshot.straighten };
 }
-function makeFrame(snapshot, size) {
+function makeFrame(snapshot, size, input = rotated) {
   const rect = cropRect(rotated.width, rotated.height, snapshot.ratio, snapshot.cropX, snapshot.cropY);
   const output = size === 'custom' ? customOutputSize(rect.width, rect.height, Number($('#export-width').value), Number($('#export-height').value)) : outputSize(rect.width, rect.height, size === 'preview' ? 'full' : size);
   if (size === 'preview' && mainZoom.zoom === 'fit') { const scale = Math.min(1, 1400 / Math.max(output.width, output.height)); output.width = Math.max(1, Math.round(output.width * scale)); output.height = Math.max(1, Math.round(output.height * scale)); }
   if (size === 'thumbnail') { const scale = Math.min(1, 180 / Math.max(output.width, output.height)); output.width = Math.max(1, Math.round(output.width * scale)); output.height = Math.max(1, Math.round(output.height * scale)); }
   const result = canvas(output.width, output.height);
   const ctx = result.getContext('2d', { willReadFrequently: true }); ctx.imageSmoothingQuality = 'high';
-  ctx.drawImage(rotated, rect.x, rect.y, rect.width, rect.height, 0, 0, output.width, output.height);
+  ctx.drawImage(input, rect.x, rect.y, rect.width, rect.height, 0, 0, output.width, output.height);
   result.photoGeometry = photoGeometry(snapshot, rect);
   return result;
 }
 function requestPreview() {
+  folderUI?.edited(JSON.stringify(state));
   previewVersion++; clearTimeout(previewTimer);
   previewTimer = setTimeout(renderPreview, 65);
 }
@@ -194,17 +224,21 @@ async function renderPreview() {
   const version = previewVersion;
   $('#processing').hidden = false;
   try {
+    const snapshot = structuredClone(state);
+    await ensureHealing(snapshot);
+    if (version !== previewVersion) return;
+    rebuildRotation();
     const frame = makeFrame(state, 'preview');
     const data = frame.getContext('2d').getImageData(0, 0, frame.width, frame.height);
     const edited = await pixelsInWorker(data, { ...effectiveParams(state), geometry: frame.photoGeometry });
     if (version !== previewVersion) return;
     const preview = $('#preview'), original = $('#original');
     preview.width = original.width = frame.width; preview.height = original.height = frame.height;
-    original.getContext('2d').drawImage(frame, 0, 0);
+    original.getContext('2d').drawImage(rotatedInput === source ? frame : makeFrame(snapshot, 'preview', rotatePhoto(source, snapshot)), 0, 0);
     preview.getContext('2d').putImageData(edited, 0, 0);
     previewGeometry = frame.photoGeometry;
     fitPhoto();
-    advancedUI.drawOverlay(); updateGuides();
+    advancedUI.drawOverlay(); healingUI.sync(); updateGuides();
   } catch (error) { toast(error.message || 'The preview could not be rendered. Try a smaller photo.'); }
   finally { rendering = false; $('#processing').hidden = true; if (renderAgain || version !== previewVersion) renderPreview(); }
 }
@@ -230,7 +264,7 @@ function updateComparison() {
   $('#original-overlay').style.clipPath = `inset(0 ${100 - position}% 0 0)`; $('#split-line').style.left = `${position}%`;
   $('#compare').setAttribute('aria-pressed', compareOn);
 }
-$('#compare').addEventListener('click', () => { advancedUI.stopDrawing(); compareOn = !compareOn; updateComparison(); });
+$('#compare').addEventListener('click', () => { stopInteractions(); compareOn = !compareOn; updateComparison(); });
 $('#comparison').addEventListener('input', updateComparison);
 $$('.crop-options button').forEach(button => button.addEventListener('click', () => { state.ratio = button.dataset.ratio; state.cropX = state.cropY = 50; syncControls(); checkpoint(); requestPreview(); }));
 for (const axis of ['x', 'y']) {
@@ -248,7 +282,7 @@ $('#straighten').addEventListener('change', checkpoint);
 $('#straighten-reset').addEventListener('click', () => { state.straighten = 0; rebuildRotation(); syncControls(); checkpoint(); requestPreview(); });
 $('#rotate').addEventListener('click', () => { state.rotation = (state.rotation + 90) % 360; state.cropX = state.cropY = 50; rebuildRotation(); syncControls(); checkpoint(); requestPreview(); });
 function restoreHistory(offset) {
-  if (advancedUI.stopDrawing()) return;
+  if (stopInteractions()) return;
   const next = historyIndex + offset; if (next < 0 || next >= history.length) return;
   const oldRotation = state.rotation, oldStraighten = state.straighten; historyIndex = next; state = JSON.parse(history[historyIndex]);
   if (oldRotation !== state.rotation || oldStraighten !== state.straighten) rebuildRotation(); syncControls(); requestPreview();
@@ -258,7 +292,7 @@ document.addEventListener('keydown', event => {
   if ($('#export-dialog').open || $('#camera-dialog').open || /INPUT|SELECT|TEXTAREA/.test(event.target.tagName)) return;
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') { event.preventDefault(); restoreHistory(event.shiftKey ? 1 : -1); }
 });
-$('#reset').addEventListener('click', () => { advancedUI.stopDrawing(); state = { ...freshState(), preset: null, strength: 0 }; rebuildRotation(); syncControls(); checkpoint(); requestPreview(); toast('Back to your original. You can undo this anytime.'); });
+$('#reset').addEventListener('click', () => { stopInteractions(); state = { ...freshState(), preset: null, strength: 0 }; rebuildRotation(); syncControls(); checkpoint(); requestPreview(); toast('Back to your original. You can undo this anytime.'); });
 $('#auto').addEventListener('click', () => {
   if (!source) return;
   const sample = canvas(100, 100); const ctx = sample.getContext('2d'); ctx.drawImage(source, 0, 0, 100, 100);
@@ -279,7 +313,7 @@ async function decodePhoto(blob, name) {
   if (!['image/jpeg', 'image/png'].includes(blob.type) && !/\.(png|jpe?g)$/i.test(name)) throw new Error('Choose a JPG, PNG, HEIC, or HEIF photo.');
   return createImageBitmap(blob, { imageOrientation: 'from-image' });
 }
-async function loadPhoto(blob, name, sample = false) {
+async function loadPhoto(blob, name, sample = false, draft = null) {
   const version = ++loadVersion; loading = true; previewVersion++;
   $('.editor').classList.add('busy'); $('#export-open').disabled = true; $('#processing').hidden = false; $('#processing').textContent = 'Opening your photo…';
   try {
@@ -290,8 +324,8 @@ async function loadPhoto(blob, name, sample = false) {
     const scale = Math.min(1, Math.sqrt(16000000 / (nativeW * nativeH)), 8192 / Math.max(nativeW, nativeH));
     const nextSource = canvas(Math.max(1, Math.floor(nativeW * scale)), Math.max(1, Math.floor(nativeH * scale)));
     const ctx = nextSource.getContext('2d'); ctx.imageSmoothingQuality = 'high'; ctx.drawImage(bitmap, 0, 0, nextSource.width, nextSource.height); bitmap.close();
-    advancedUI.stopDrawing(); previewGeometry = null;
-    source = nextSource; sourceName = name; state = freshState(); history = []; historyIndex = -1; mainZoom.reset();
+    stopInteractions(); previewGeometry = null; healedSource = healedOriginal = null; healedKey = '';
+    source = nextSource; sourceName = name; state = draft ? structuredClone(draft.state) : freshState(); history = draft ? [...draft.history] : []; historyIndex = draft ? draft.historyIndex : -1; mainZoom.reset();
     rebuildRotation(); checkpoint(); syncControls();
     $('#filename').textContent = name;
     $('#dimensions').textContent = `${source.width.toLocaleString()} × ${source.height.toLocaleString()} px · ${sample ? 'Sample photo' : 'On your device'}${scale < 1 ? ' · Working copy resized' : ''}`;
@@ -299,9 +333,11 @@ async function loadPhoto(blob, name, sample = false) {
     buildThumbnails();
     if (scale < 1) toast('Large photo resized to a safe working copy (up to 16 MP / 8192 px). Your original is untouched.');
     else if (!sample) toast('Photo opened. Pick a look to get started.');
+    return true;
   } catch (error) {
     console.error(error);
     toast(error.message && error.message !== 'The source image could not be decoded.' ? error.message : 'This photo could not be opened. Try another JPG, PNG, HEIC, or HEIF file.');
+    return false;
   } finally {
     if (version === loadVersion) { loading = false; $('.editor').classList.remove('busy'); $('#export-open').disabled = !source; $('#processing').textContent = 'Developing your photo…'; $('#processing').hidden = true; requestPreview(); }
   }
@@ -317,16 +353,31 @@ function buildThumbnails() {
   }
 }
 for (const id of ['open', 'open-inline']) $(`#${id}`).addEventListener('click', () => $('#file').click());
-$('#file').addEventListener('change', () => { const file = $('#file').files[0]; if (file) loadPhoto(file, file.name); $('#file').value = ''; });
+$('#file').addEventListener('change', () => { const file = $('#file').files[0]; if (file) folderUI.openPhoto(file); $('#file').value = ''; });
 let dragDepth = 0;
 document.addEventListener('dragenter', event => { if (!event.dataTransfer.types.includes('Files')) return; event.preventDefault(); dragDepth++; $('#stage-message').hidden = false; });
 document.addEventListener('dragover', event => { if (event.dataTransfer.types.includes('Files')) event.preventDefault(); });
 document.addEventListener('dragleave', () => { if (--dragDepth <= 0) { dragDepth = 0; $('#stage-message').hidden = true; } });
-document.addEventListener('drop', event => { event.preventDefault(); dragDepth = 0; $('#stage-message').hidden = true; const file = event.dataTransfer.files[0]; if (file) loadPhoto(file, file.name); });
+document.addEventListener('drop', event => { event.preventDefault(); dragDepth = 0; $('#stage-message').hidden = true; if (document.querySelector('dialog[open]')) { toast('Close the dialog before opening another photo.'); return; } const file = event.dataTransfer.files[0]; if (file) folderUI.openPhoto(file); });
 function toBlob(element, type, quality) {
   return new Promise((resolve, reject) => element.toBlob(blob => blob ? resolve(blob) : reject(new Error('Could not create the export. Try a smaller size.')), type, quality));
 }
 function exportFormat() { return $('input[name=format]:checked').value; }
+function downloadBlob(blob, filename) {
+  const link = document.createElement('a'), url = URL.createObjectURL(blob); link.href = url; link.download = filename; link.click(); setTimeout(() => URL.revokeObjectURL(url), 30000);
+}
+async function renderPhotoBlob(snapshot, type, size, quality, isCurrent = () => true) {
+  await ensureHealing(snapshot);
+  if (!isCurrent()) return null;
+  rebuildRotation();
+  const frame = makeFrame(snapshot, size), ctx = frame.getContext('2d');
+  const result = await pixelsInWorker(ctx.getImageData(0, 0, frame.width, frame.height), { ...effectiveParams(snapshot), geometry: frame.photoGeometry });
+  if (!isCurrent()) return null;
+  ctx.putImageData(result, 0, 0);
+  if (type !== 'image/png') { ctx.globalCompositeOperation = 'destination-over'; ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, frame.width, frame.height); }
+  const blob = type === 'image/heif' ? await encodeHeifInWorker(frame) : await toBlob(frame, type, quality);
+  return { blob, frame };
+}
 function cancelHeif() { heifTask?.cancel(); heifTask = null; }
 function encodeHeifInWorker(frame) {
   return new Promise((resolve, reject) => {
@@ -352,15 +403,10 @@ async function prepareExport() {
   try {
     const snapshot = structuredClone(state);
     const type = exportFormat(), quality = Number($('#quality').value) / 100;
-    const frame = makeFrame(snapshot, $('#export-size').value);
-    const ctx = frame.getContext('2d');
-    const result = await pixelsInWorker(ctx.getImageData(0, 0, frame.width, frame.height), { ...effectiveParams(snapshot), geometry: frame.photoGeometry });
-    if (version !== exportVersion || !$('#export-dialog').open) return;
-    ctx.putImageData(result, 0, 0);
-    if (type !== 'image/png') { ctx.globalCompositeOperation = 'destination-over'; ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, frame.width, frame.height); }
     if (type === 'image/heif') $('#export-meta').textContent = 'Encoding HEIF on your device…';
-    const blob = type === 'image/heif' ? await encodeHeifInWorker(frame) : await toBlob(frame, type, quality);
-    if (version !== exportVersion || !$('#export-dialog').open) return;
+    const rendered = await renderPhotoBlob(snapshot, type, $('#export-size').value, quality, () => version === exportVersion && $('#export-dialog').open);
+    if (!rendered || version !== exportVersion || !$('#export-dialog').open) return;
+    const { blob, frame } = rendered;
     let previewBlob = blob;
     if (type === 'image/heif') {
       const { heicTo } = await import('./vendor/heic-to.js');
@@ -368,6 +414,7 @@ async function prepareExport() {
     }
     if (version !== exportVersion || !$('#export-dialog').open) return;
     exportBlob = blob;
+    exportFingerprint = JSON.stringify(snapshot);
     exportFilename = `${sourceName.replace(/\.[^.]+$/, '').replace(/[<>:"/\\|?*\x00-\x1F]/g, '-').slice(0, 100)}${snapshot.camera ? `-${snapshot.camera}` : ''}-vibe.${type === 'image/png' ? 'png' : type === 'image/heif' ? 'heif' : 'jpg'}`;
     if (exportURL) URL.revokeObjectURL(exportURL); exportURL = URL.createObjectURL(previewBlob); $('#export-preview').src = exportURL;
     const sizeLabel = blob.size < 1048576 ? `${Math.round(blob.size / 1024)} KB` : `${(blob.size / 1048576).toFixed(1)} MB`;
@@ -375,11 +422,12 @@ async function prepareExport() {
     $('#download').disabled = false;
     const file = new File([blob], exportFilename, { type });
     $('#share').hidden = !navigator.canShare?.({ files: [file] });
+    $('#download').textContent = folderUI.active ? '↓ Save edited copy' : '↓ Save photo';
   } catch (error) { if (version === exportVersion) { $('#export-meta').textContent = error.message || 'Export failed. Try a smaller image size.'; toast(error.message); } }
 }
 $('#export-open').addEventListener('click', () => {
   if (!source || loading) return;
-  advancedUI.stopDrawing();
+  stopInteractions();
   const rect = cropRect(rotated.width, rotated.height, state.ratio, state.cropX, state.cropY), size = outputSize(rect.width, rect.height, 'instagram');
   $('#export-width').value = size.width; $('#export-height').value = size.height;
   $('#export-width').max = Math.round(rect.width); $('#export-height').max = Math.round(rect.height);
@@ -398,16 +446,30 @@ for (const axis of ['width', 'height']) $(`#export-${axis}`).addEventListener('i
 });
 let qualityTimer;
 $('#quality').addEventListener('input', () => { exportVersion++; exportBlob = null; $('#download').disabled = true; $('#share').hidden = true; $('#quality-value').textContent = `${$('#quality').value}%`; fillRange($('#quality')); clearTimeout(qualityTimer); qualityTimer = setTimeout(prepareExport, 180); });
-$('#download').addEventListener('click', () => {
+$('#download').addEventListener('click', async () => {
   if (!exportBlob) return;
-  const link = document.createElement('a'); const url = URL.createObjectURL(exportBlob); link.href = url; link.download = exportFilename; link.click(); setTimeout(() => URL.revokeObjectURL(url), 30000); toast('Saved a fresh copy. Ready for your Instagram upload.');
+  if (folderUI.active) await folderUI.save(exportBlob, exportFormat(), exportFingerprint);
+  else { downloadBlob(exportBlob, exportFilename); toast('Saved a fresh copy. Ready for your Instagram upload.'); }
 });
 $('#share').addEventListener('click', async () => {
   if (!exportBlob) return;
   try { await navigator.share({ files: [new File([exportBlob], exportFilename, { type: exportBlob.type })], title: 'My Vibe photo' }); }
   catch (error) { if (error.name !== 'AbortError') toast('Sharing is unavailable here. Save the photo instead.'); }
 });
-advancedUI = setupAdvanced({ getState: () => state, geometry: () => previewGeometry, changed: commit => { if (commit) checkpoint(); requestPreview(); }, notify: toast, onDraw: drawing => { if (drawing) { compareOn = false; updateComparison(); } } });
+advancedUI = setupAdvanced({ getState: () => state, geometry: () => previewGeometry, changed: commit => { if (commit) checkpoint(); requestPreview(); }, notify: toast, onDraw: drawing => { if (drawing) { healingUI?.stopDrawing(); compareOn = false; updateComparison(); } } });
+healingUI = setupHealing({ getState: () => state, geometry: () => previewGeometry, changed: commit => { if (commit) checkpoint(); requestPreview(); }, notify: toast, onDraw: drawing => { if (drawing) { advancedUI.stopDrawing(); compareOn = false; updateComparison(); } } });
+folderUI = setupFolder({
+  capture: () => { stopInteractions(); checkpoint(); return { state: structuredClone(state), history: [...history], historyIndex }; },
+  load: (file, name, draft) => loadPhoto(file, name, false, draft),
+  encode: async type => (await renderPhotoBlob(structuredClone(state), type, 'full', .95)).blob,
+  notify: toast, download: downloadBlob,
+  lock: busy => {
+    $('.editor').inert = busy;
+    for (const id of ['open', 'open-inline', 'folder-open', 'folder-files-open']) $(`#${id}`).disabled = busy;
+    $('#export-open').disabled = busy || loading || !source;
+    $('#download').disabled = busy || !exportBlob;
+  },
+});
 for (const details of $$('.slider-group')) details.addEventListener('toggle', () => {
   if (details.open) $$('.slider-group').forEach(other => { if (other !== details) other.open = false; });
   if (details.id === 'masks-panel' && !details.open) advancedUI.stopDrawing();

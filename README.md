@@ -1,6 +1,6 @@
 # Vibe Photo Editor
 
-A private photo editor for everyday images, with camera-inspired looks, detailed adjustments, and a zoomable preview. Runs locally in your browser. No account, API key, or photo uploads.
+A private photo editor for everyday images, with camera-inspired looks, detailed adjustments, and a zoomable preview. Runs locally in your browser or as a portable Windows desktop app. No account, API key, or photo uploads.
 
 ![Vibe Photo Editor showing tone curves, preview zoom, and composition guides](docs/editor-preview.jpg)
 
@@ -19,6 +19,9 @@ The editor with a custom tone curve and rule-of-thirds guides. HSL color mixing 
 - **JPG, PNG, HEIC, and HEIF import**; **JPG, PNG, and HEIF export** with a preview of the actual saved image.
 - **Undo/redo** and reversible edits. Export saves a new copy.
 - **Local processing** using Canvas and background workers. Bundled codecs keep runtime use offline.
+- **Folder workflow** with filename search, previous/next navigation, per-photo drafts, and edited copies saved into an `edited` subfolder.
+- **Magic Eraser** for small blemishes, with brush size, healing strength, edge softness, and texture retention controls.
+- **Portable Windows EXE** built with Electron, including an app icon and native folder access.
 
 ## Quick start
 
@@ -32,7 +35,7 @@ npm start
 
 Open **http://127.0.0.1:5173**. On Windows, you can also double-click **Start Editor.cmd**. Keep the terminal open while editing; press Ctrl+C to stop the server.
 
-There is no build step. The HEIF decoder and encoder are bundled in `vendor/`, so running the editor does not require `npm install` or an Internet connection. To install the pinned packages for dependency maintenance, use `npm ci --ignore-scripts`.
+The browser version needs no build step. The HEIF decoder and encoder are bundled in `vendor/`, so running it does not require `npm install` or an Internet connection. To install the pinned packages for dependency maintenance without running install scripts, use `npm ci --ignore-scripts`.
 
 To use another port:
 
@@ -47,6 +50,29 @@ npm start
 PORT=5174 npm start
 ```
 
+### Windows desktop app and single EXE build
+
+On **Windows 10/11 x64**, install **Node.js 22.12 or newer**, then run:
+
+```sh
+npm ci
+npm run build:win
+```
+
+Alternatively, double-click **Build Windows App.cmd**. The portable output is **`dist/Vibe-Photo-Editor-1.0.0-win-x64.exe`**. Distribute that one file; it includes Electron, the editor, the sample, and both codecs. Users do not need Node.js, an installer, a running server, or an Internet connection. The EXE extracts its runtime to a temporary directory when launched. Building requires Internet access for the initial dependency/tool downloads and several gigabytes of free space; `dist/` is excluded from Git.
+
+The EXE and desktop window use the Vibe icon in `assets/icon.ico`, with sizes from 16 to 256 px. Its editable source is `assets/icon.svg`; regenerate the Windows icon with `npm run icon`.
+
+For development, run **`npm run desktop`**. **`npm run desktop:smoke`** opens a hidden test window and checks startup, renderer isolation, a real folder read/save round trip through the bridge, Magic Eraser, pixel workers, HEIF export, and HEIC/HEIF decoding. It uses and removes its own temporary image fixture. After building, test the packaged runtime with:
+
+```sh
+node scripts/smoke-desktop.mjs "dist/win-unpacked/Vibe Photo Editor.exe"
+```
+
+The same check accepts the single portable EXE's path to verify extraction and startup too.
+
+The desktop app uses native **Open folder** and **Choose save folder** dialogs. Save writes fresh copies into `edited` directly; browser folder APIs are not required. Single-photo downloads use a native Save dialog. The renderer is sandboxed and isolated from Node; the preload exposes only folder selection, selected-image reading, and edited-copy saving. Only bundled resources load, and no local web server is started. The current build is unsigned; a signed release requires configuring a Windows signing certificate in electron-builder.
+
 ## Editing a photo
 
 1. Open or drop a photo, or try the included mountain sample.
@@ -57,7 +83,7 @@ PORT=5174 npm start
 5. Choose a crop and reposition it with the frame sliders. Use **Straighten** (±15°) to level the photo and **Crop guides** to align the composition.
 6. Open **Export photo**, choose a format and size, inspect the export preview, and save a copy. Device file sharing is available when supported by the browser.
 
-Choosing a look clears the basic manual adjustment offsets and retains the camera, curves, HSL edits, and masks. Changing cameras retains your manual edits. A basic slider reset returns that slider to the selected styles. Undo/redo includes styles, strengths, curves, HSL, masks, crop, rotation, and straightening. **Reset** clears all edits and returns to the original image.
+Choosing a look clears the basic manual adjustment offsets and retains the camera, curves, HSL edits, masks, and spot repairs. Changing cameras retains your manual edits. A basic slider reset returns that slider to the selected styles. Undo/redo includes styles, strengths, curves, HSL, masks, spot repairs, crop, rotation, and straightening. **Reset** clears all edits and returns to the original image.
 
 ### Curves, color, and masks
 
@@ -81,6 +107,35 @@ Choosing a look clears the basic manual adjustment offsets and retains the camer
 | Close a dialog | Escape |
 | Move a selected curve point | Arrow keys while the curve graph is focused; Shift for larger steps |
 | Delete a curve point | Delete / Backspace while the graph is focused (interior points only) |
+| Previous / next folder photo | Alt+Left / Alt+Right, outside form controls |
+
+### Working through a folder
+
+1. Click **Open folder** and choose a local photo folder. Supported JPG, PNG, HEIC, and HEIF images are listed by name, including nested folders. Existing `edited` subfolders and unsupported files are skipped. Up to 10,000 image entries are supported; photos are decoded one at a time.
+2. Search by filename or subfolder path, click an image, or use **Previous / Next**. Navigation follows the current search results. Each image keeps its own draft and undo/redo history while the folder is open. Ready, Unsaved edits, and Saved badges show progress.
+3. Choose JPG (95% quality), PNG, or HEIF in **Save format**, then click **Save to edited**. In the browser, allow its write permission prompt when requested. The app saves at full working resolution with the current crop and edits, under `<chosen folder>/edited/`. Nested source paths are retained, and existing copies receive numbered filenames instead of being overwritten.
+4. Use **Export photo** for custom dimensions or JPG quality; its Save button writes the prepared copy to the same `edited` destination when a folder photo is selected.
+
+The Windows app supports direct disk saving through its native folder dialogs. In the browser version, direct disk saving requires the [File System Access API](https://developer.chrome.com/docs/capabilities/web-apis/file-system-access), available in supporting desktop browsers such as Chrome and Edge. The arrow beside **Open folder** offers **Browse folder files** for read-only browsing. In this mode **Save download** downloads a copy; it does not create an `edited` folder. Where supported, **Choose save folder** connects a directory and saves into its `edited` subfolder.
+
+Original files are never replaced. Drafts are held in memory, so save copies before closing or refreshing. The app warns before discarding unsaved folder drafts. Opening a single photo retains the folder's drafts so you can resume by clicking a listed image.
+
+![Folder image list, search and navigation, with Magic Eraser controls](docs/folder-workflow.jpg)
+
+Folder browsing with Magic Eraser open. The pictured browse-only mode uses downloads; opening a folder with direct access enables saving to its `edited` subfolder.
+
+### Magic Eraser: spot healing
+
+Open **Magic Eraser**, set **Brush diameter** just larger than a blemish, and enable **Click blemishes on photo**. Click individual spots, then use **Done healing** to resume zoom/pan. **Selected repair** lets you tune or remove an existing repair; select **New repair settings** to configure future clicks.
+
+- **Healing strength** blends the repair with the original pixels.
+- **Edge softness** controls the transition at the brush boundary.
+- **Texture retention** controls how much neighboring texture is retained.
+- **Show repair outlines** is a preview aid. It is excluded from saved files.
+
+The tool chooses nearby pixels, matches their color and lighting to the surrounding area, and blends them into the selected circle. It runs on the full working image in a background worker before crop, rotation, styles, and export. Before/after comparison includes the unrepaired original, and repairs follow each folder photo's history. Up to 80 repairs per photo are supported.
+
+Best suited to small spots surrounded by similar texture. Strong edges, hair, large objects, and image corners may not provide a suitable donor area. It does not generate new content or apply a global skin blur; the supplied photo must contain usable nearby texture.
 
 ## Formats and export
 
@@ -114,7 +169,7 @@ npm run check
 npm test
 ```
 
-The 29 tests cover pixel processing, camera/look stacking, curves/HSL, mask feathering and brush erasing, mask alignment across crop/rotation/straightening, custom export validation, zoom/pan boundaries, and HEIF encoding round trips. Browser checks and their limitations are recorded in [tests/VALIDATION.md](tests/VALIDATION.md).
+The 41 tests cover pixel processing, camera/look stacking, curves/HSL, masks and coordinate alignment, custom export validation, zoom/pan, HEIF round trips, folder enumeration and real filesystem writes, spot healing with texture and alpha preservation, and desktop folder access boundaries. Windows junction tests require permission to create junctions. Browser and desktop checks and their limitations are recorded in [tests/VALIDATION.md](tests/VALIDATION.md).
 
 | File | Purpose |
 | --- | --- |
@@ -122,15 +177,20 @@ The 29 tests cover pixel processing, camera/look stacking, curves/HSL, mask feat
 | `engine.js` | Shared pixel processing and crop/export geometry |
 | `advanced.js` | Curves, HSL, mask rasterization, coordinate transforms, and custom sizing |
 | `advanced-ui.js` | Curves/color controls and mask drawing interactions |
+| `folder-library.js`, `folder-ui.js` | Folder enumeration, search, drafts, permissions, and edited-copy saving |
+| `healing.js`, `healing-ui.js` | Local texture healing and the Magic Eraser controls |
 | `cameras.js` | Camera-inspired profile definitions |
 | `worker.js` | Background pixel processing |
 | `preview-zoom.js` | Editor/export zoom and pan |
 | `heif-codec.js`, `heif-worker.js` | Local HEIF encoding |
 | `index.html`, `styles.css` | Interface and responsive layout |
 | `server.mjs` | Loopback static server |
+| `desktop/` | Electron window, isolated preload, and scoped native folder access |
+| `assets/icon.svg`, `assets/icon.ico` | App icon source and Windows icon |
+| `scripts/` | Icon generation and packaged-app smoke check |
 | `vendor/` | Bundled codecs and their license notices |
 
-Edit source files and refresh the browser. Keep dependency versions pinned, run checks, and update [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) when replacing a codec.
+Edit source files and refresh the browser, or restart the desktop app. Keep dependency versions pinned, run checks, and update [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) when replacing a codec. The desktop wrapper follows [Electron's security guidance](https://www.electronjs.org/docs/latest/tutorial/security), and the portable target uses [electron-builder](https://www.electron.build/v26/docs/win/).
 
 ## Contributing
 

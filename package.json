@@ -3,16 +3,73 @@
   "version": "1.0.0",
   "private": true,
   "license": "MIT",
-  "repository": { "type": "git", "url": "https://github.com/kurta999/VibePhotoEditor.git" },
+  "main": "desktop/main.mjs",
+  "author": "Vibe Photo Editor contributors",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kurta999/VibePhotoEditor.git"
+  },
   "type": "module",
   "description": "A private, beginner-friendly photo editor with camera-inspired looks.",
   "scripts": {
     "start": "node server.mjs",
+    "desktop": "electron .",
+    "desktop:smoke": "electron . --smoke-test",
+    "icon": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/create-icon.ps1",
+    "build:win": "node scripts/build-windows.mjs",
     "test": "node --test tests/*.test.mjs",
-    "check": "node --check app.js && node --check engine.js && node --check cameras.js && node --check worker.js && node --check server.mjs && node --check preview-zoom.js && node --check heif-codec.js && node --check heif-worker.js && node --check advanced.js && node --check advanced-ui.js"
+    "check": "node --check app.js && node --check engine.js && node --check cameras.js && node --check worker.js && node --check server.mjs && node --check preview-zoom.js && node --check heif-codec.js && node --check heif-worker.js && node --check advanced.js && node --check advanced-ui.js && node --check folder-library.js && node --check folder-ui.js && node --check healing.js && node --check healing-ui.js && node --check desktop/main.mjs && node --check desktop/preload.cjs && node --check desktop/folder-access.mjs && node --check desktop/smoke.mjs && node --check scripts/build-windows.mjs && node --check scripts/smoke-desktop.mjs"
   },
-  "dependencies": {
+  "devDependencies": {
     "elheif": "0.1.0",
-    "heic-to": "1.6.5"
+    "heic-to": "1.6.5",
+    "electron": "44.7.0",
+    "electron-builder": "26.15.3"
+  },
+  "build": {
+    "appId": "org.vibe.photoeditor",
+    "productName": "Vibe Photo Editor",
+    "directories": {
+      "output": "dist",
+      "buildResources": "assets"
+    },
+    "asar": true,
+    "files": [
+      "index.html",
+      "styles.css",
+      "app.js",
+      "engine.js",
+      "cameras.js",
+      "worker.js",
+      "preview-zoom.js",
+      "heif-codec.js",
+      "heif-worker.js",
+      "advanced.js",
+      "advanced-ui.js",
+      "folder-library.js",
+      "folder-ui.js",
+      "healing.js",
+      "healing-ui.js",
+      "desktop/**",
+      "assets/**",
+      "vendor/**",
+      "LICENSE",
+      "THIRD_PARTY_NOTICES.md"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "assets/icon.ico",
+      "signExecutable": false
+    },
+    "portable": {
+      "artifactName": "Vibe-Photo-Editor-${version}-win-x64.exe"
+    }
   }
 }

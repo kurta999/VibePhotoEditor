@@ -1,5 +1,9 @@
 # Third-party components
 
+## Desktop runtime
+
+The Windows build includes Electron 44.7.0 (MIT) and its Chromium/Node.js runtime dependencies. electron-builder retains `LICENSE.electron.txt` and `LICENSES.chromium.html` in the packaged runtime, which is extracted when the portable EXE runs. Electron source and notices: https://github.com/electron/electron. Build tooling (`electron-builder` 26.15.3) is a development dependency, not application code: https://github.com/electron-userland/electron-builder.
+
 `vendor/heic-to.js` is an unmodified copy of the worker-capable ESM distribution from **heic-to 1.6.5**, authored by Hopper Gee, published to npm under the LGPL-3.0 license.
 
 - Versioned corresponding source package: https://registry.npmjs.org/heic-to/-/heic-to-1.6.5.tgz (includes source files and the libheif build).
