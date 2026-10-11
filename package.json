@@ -16,9 +16,11 @@
     "desktop": "electron .",
     "desktop:smoke": "electron . --smoke-test",
     "icon": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/create-icon.ps1",
+    "build:node": "node scripts/build-node.mjs",
     "build:win": "node scripts/build-windows.mjs",
+    "release:check": "node scripts/check-release.mjs",
     "test": "node --test tests/*.test.mjs",
-    "check": "node --check app.js && node --check engine.js && node --check cameras.js && node --check worker.js && node --check server.mjs && node --check preview-zoom.js && node --check heif-codec.js && node --check heif-worker.js && node --check advanced.js && node --check advanced-ui.js && node --check folder-library.js && node --check folder-ui.js && node --check healing.js && node --check healing-ui.js && node --check desktop/main.mjs && node --check desktop/preload.cjs && node --check desktop/folder-access.mjs && node --check desktop/smoke.mjs && node --check scripts/build-windows.mjs && node --check scripts/smoke-desktop.mjs"
+    "check": "node --check app.js && node --check engine.js && node --check cameras.js && node --check worker.js && node --check server.mjs && node --check preview-zoom.js && node --check heif-codec.js && node --check heif-worker.js && node --check advanced.js && node --check advanced-ui.js && node --check folder-library.js && node --check folder-ui.js && node --check healing.js && node --check healing-ui.js && node --check desktop/main.mjs && node --check desktop/preload.cjs && node --check desktop/folder-access.mjs && node --check desktop/smoke.mjs && node --check scripts/build-windows.mjs && node --check scripts/smoke-desktop.mjs && node --check scripts/build-node.mjs && node --check scripts/check-release.mjs && node --check scripts/smoke-node.mjs"
   },
   "devDependencies": {
     "elheif": "0.1.0",

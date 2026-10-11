@@ -73,6 +73,29 @@ The same check accepts the single portable EXE's path to verify extraction and s
 
 The desktop app uses native **Open folder** and **Choose save folder** dialogs. Save writes fresh copies into `edited` directly; browser folder APIs are not required. Single-photo downloads use a native Save dialog. The renderer is sandboxed and isolated from Node; the preload exposes only folder selection, selected-image reading, and edited-copy saving. Only bundled resources load, and no local web server is started. The current build is unsigned; a signed release requires configuring a Windows signing certificate in electron-builder.
 
+### CI/CD and releases
+
+The [CI and release workflow](.github/workflows/ci-release.yml) runs on branch pushes, pull requests, version tags, and manual runs. It checks syntax and runs the unit tests on **Node.js 22 and 24, on Linux and Windows**. After all checks pass, it packages and smoke-tests the Node release, then builds the Windows Electron release as the final build stage. Desktop checks exercise the development app, the unpacked runtime, and the portable EXE, including its extraction and startup.
+
+Every successful run saves two downloadable Actions artifacts for 14 days:
+
+- **`release-node`**: `Vibe-Photo-Editor-<version>-node.tgz`, containing the browser editor, local Node server, sample, codecs, and documentation. Extract it, open the `package` directory, and run `npm start`. No dependency installation is needed; Node.js 18 or newer is required to run it.
+- **`release-electron`**: `Vibe-Photo-Editor-<version>-win-x64.exe`, the unsigned portable Windows app.
+
+To build the Node archive locally, run `npm run build:node`. It does not require `npm install`. The archive is written to `dist/`; its minimal package manifest excludes Electron and development dependencies.
+
+To publish both downloads to [GitHub Releases](https://github.com/kurta999/VibePhotoEditor/releases), update the version and push a matching tag:
+
+```sh
+npm version 1.0.1
+git push origin HEAD
+git push origin v1.0.1
+```
+
+Start from a clean, committed checkout. `npm version` updates `package.json` and `package-lock.json`, commits them, and creates the tag. The workflow rejects a tag that does not exactly match `v<package.json version>` or a mismatched lockfile version. Tags such as `v1.1.0-beta.1` publish prereleases.
+
+Publication happens only on a version-tag push, after both smoke-tested builds succeed. It uses the automatic `GITHUB_TOKEN` with write permission only in the publish job; no npm token or additional release secret is needed. A draft release receives both downloads and `SHA256SUMS.txt` before publication. A failed draft upload can be retried by rerunning the job; an already published release is never replaced. Branch, pull-request, and manual runs only produce Actions artifacts.
+
 ## Editing a photo
 
 1. Open or drop a photo, or try the included mountain sample.
