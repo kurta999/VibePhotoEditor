@@ -1,4 +1,5 @@
 import { CAMERAS } from './cameras.js';
+import { applyColor, rasterMask } from './advanced.js';
 export const DEFAULTS = Object.freeze({ exposure: 0, contrast: 0, highlights: 0, shadows: 0, blacks: 0, saturation: 0, vibrance: 0, warmth: 0, tint: 0, clarity: 0, dehaze: 0, sharpen: 0, grain: 0, vignette: 0, glow: 0, softness: 0 });
 export const PRESETS = [
   { id: 'natural', name: 'True to life', subtitle: 'Clean · everyday', category: 'camera', params: { contrast: 5, shadows: 10, vibrance: 8, sharpen: 10 } },
@@ -57,6 +58,8 @@ export function effectiveParams(state) {
     params[key] = Math.max(minimum, Math.min(100, (preset?.params[key] || 0) * strength + (camera?.params[key] || 0) * cameraStrength + (state.adjustments[key] || 0)));
   }
   params.mono = preset?.mono ? strength : 0;
+  if (state.color) params.color = state.color;
+  if (state.masks) params.masks = state.masks;
   return params;
 }
 export function cropRect(width, height, ratio = 'original', x = 50, y = 50) {
@@ -161,6 +164,13 @@ export function processPixels(pixels, width, height, p) {
       const noise = ((hash >>> 0) / 4294967295 - .5) * p.grain * .48;
       for (let c = 0; c < 3; c++) out[i + c] = clamp(out[i + c] * vignette + noise);
     }
+  }
+  applyColor(out, p.color);
+  if (p.geometry) for (const mask of p.masks || []) {
+    if (!mask.enabled || !Object.values(mask.adjustments).some(value => value)) continue;
+    const alpha = rasterMask(mask, width, height, p.geometry);
+    const local = processPixels(out, width, height, { ...DEFAULTS, ...mask.adjustments });
+    for (let i = 0; i < alpha.length; i++) for (let c = 0; c < 3; c++) out[i * 4 + c] += (local[i * 4 + c] - out[i * 4 + c]) * alpha[i];
   }
   return out;
 }

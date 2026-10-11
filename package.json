@@ -9,7 +9,7 @@
   "scripts": {
     "start": "node server.mjs",
     "test": "node --test tests/*.test.mjs",
-    "check": "node --check app.js && node --check engine.js && node --check cameras.js && node --check worker.js && node --check server.mjs && node --check preview-zoom.js && node --check heif-codec.js && node --check heif-worker.js"
+    "check": "node --check app.js && node --check engine.js && node --check cameras.js && node --check worker.js && node --check server.mjs && node --check preview-zoom.js && node --check heif-codec.js && node --check heif-worker.js && node --check advanced.js && node --check advanced-ui.js"
   },
   "dependencies": {
     "elheif": "0.1.0",

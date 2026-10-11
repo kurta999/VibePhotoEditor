@@ -2,15 +2,20 @@
 
 A private photo editor for everyday images, with camera-inspired looks, detailed adjustments, and a zoomable preview. Runs locally in your browser. No account, API key, or photo uploads.
 
-![Vibe Photo Editor](docs/editor-preview.png)
+![Vibe Photo Editor showing tone curves, preview zoom, and composition guides](docs/editor-preview.jpg)
+
+The editor with a custom tone curve and rule-of-thirds guides. HSL color mixing and selective masks are available in the adjustment panel.
 
 ## Features
 
 - **20 looks** with mood search and adjustable strength.
 - **15 camera-inspired profiles** from Canon, Nikon, Sony, Fujifilm, Hasselblad, and Leica, with an independent strength control.
 - **16 adjustments** for light, color, detail, and atmosphere.
+- **Master and RGB tone curves** with smooth interpolation, draggable points, and numeric input/output controls.
+- **Eight-range HSL mixer** for hue, saturation, and luminance, with smooth transitions between colors.
+- **Selective radial, gradient, and brush masks** with feathering, inversion, brush erasing, and six local adjustments.
 - **Preview zoom and pan**, including Fit, 100% detail inspection, percentage presets, wheel zoom, and before/after comparison.
-- **Crop and rotation** with portrait, square, story, wide, and original aspect ratios.
+- **Crop, rotation, and straightening** with automatic corner trimming, rule-of-thirds guides, and an alignment grid.
 - **JPG, PNG, HEIC, and HEIF import**; **JPG, PNG, and HEIF export** with a preview of the actual saved image.
 - **Undo/redo** and reversible edits. Export saves a new copy.
 - **Local processing** using Canvas and background workers. Bundled codecs keep runtime use offline.
@@ -47,11 +52,21 @@ PORT=5174 npm start
 1. Open or drop a photo, or try the included mountain sample.
 2. Choose a look and adjust its strength. Optionally open **Camera simulation** to choose a camera-inspired profile.
 3. Fine-tune the **Light**, **Color**, and **Detail & atmosphere** controls. Slider values combine the chosen styles with your manual adjustments.
+   Open **Tone curves** or **HSL color mixer** for precise tonal and color edits. Use **Selective masks** to adjust a specific region.
 4. Inspect detail with zoom and pan. Enable **Compare before / after** to compare the same crop and rotation. Use **Pan** to move the photo while comparing.
-5. Choose a crop and reposition it with the frame sliders.
+5. Choose a crop and reposition it with the frame sliders. Use **Straighten** (±15°) to level the photo and **Crop guides** to align the composition.
 6. Open **Export photo**, choose a format and size, inspect the export preview, and save a copy. Device file sharing is available when supported by the browser.
 
-Choosing a look clears manual adjustment offsets and retains the camera selection. Changing cameras retains manual offsets. A slider reset returns that slider to the selected styles. Undo/redo includes styles, strengths, adjustments, crop, and rotation.
+Choosing a look clears the basic manual adjustment offsets and retains the camera, curves, HSL edits, and masks. Changing cameras retains your manual edits. A basic slider reset returns that slider to the selected styles. Undo/redo includes styles, strengths, curves, HSL, masks, crop, rotation, and straightening. **Reset** clears all edits and returns to the original image.
+
+### Curves, color, and masks
+
+- **Tone curves:** choose Master RGB, Red, Green, or Blue. Click the graph or **Add point** to create a control point (up to 12 per channel). Drag it, or edit its 0–255 input and output values. Endpoints keep their input positions but can change output. **Reset channel** restores a diagonal curve. Curves use smooth, shape-preserving interpolation.
+- **HSL:** select Red, Orange, Yellow, Green, Aqua, Blue, Purple, or Magenta. Adjust hue (±60°), saturation, and luminance. Neighboring ranges blend smoothly; neutral grays are protected. Reset a single range or all colors.
+- **Masks:** add up to four masks. A radial mask selects a feathered circle; a gradient fades from its full-effect edge to its no-effect edge; a brush selects painted areas. **Draw on photo** enables drawing, and **Done drawing** returns to zoom/pan. The drawing bar links back to the local controls on smaller screens. Use numeric position sliders for radial and gradient geometry.
+- Each mask supports local brightness, contrast, highlights, shadows, saturation, and warmth. **Enabled** toggles its effect, **Invert** reverses the selection, and **Show overlay** displays the selected region in pink. Masks apply in list order and follow the original photo through crop, rotation, and straightening.
+- Brush size and feather apply to new strokes. Enable **Erase brush strokes** to remove painted areas. A brush mask supports up to 64 strokes, with up to 512 sampled points per stroke. Undo/redo includes painting and erasing. Delete a mask to remove both its selection and local edits.
+- Guides, mask overlays, and mask outlines are preview aids and never appear in exported images. Straightening zooms into the image enough to remove empty corners; it does not invent missing image content.
 
 ### Keyboard and pointer controls
 
@@ -64,6 +79,8 @@ Choosing a look clears manual adjustment offsets and retains the camera selectio
 | Pan | Drag, or arrow keys while the preview is focused |
 | Move comparison divider | Drag the divider, or arrow keys while its slider is focused |
 | Close a dialog | Escape |
+| Move a selected curve point | Arrow keys while the curve graph is focused; Shift for larger steps |
+| Delete a curve point | Delete / Backspace while the graph is focused (interior points only) |
 
 ## Formats and export
 
@@ -75,7 +92,7 @@ Choosing a look clears manual adjustment offsets and retains the camera selectio
 
 HEIF encoding runs in a disposable background worker and takes longer than JPG/PNG. The export preview is decoded from the saved HEIF bytes. Some receiving apps require HEIF support. Changing format or size, or closing the export dialog, cancels ongoing HEIF encoding.
 
-**Instagram** export limits width to 1080 px without upscaling. **Full working resolution** uses the full in-memory image; **2048 px** limits its longest edge. All modes respect your crop.
+**Instagram** export limits width to 1080 px without upscaling. **Full working resolution** uses the full in-memory image; **2048 px** limits its longest edge. **Custom dimensions** lets you enter width or height in pixels, with the other dimension linked to your crop aspect ratio. Custom export accepts whole numbers, stays within the working crop resolution and 16 MP / 8192 px limits, and does not upscale. Choose a different crop to change the aspect ratio. All modes include curves, HSL, local masks, and straightening.
 
 ![HEIF export with zoom controls](docs/heif-export-preview.png)
 
@@ -97,12 +114,14 @@ npm run check
 npm test
 ```
 
-The tests cover pixel processing, camera/look stacking, adjustment controls, crop/export geometry, zoom/pan boundaries, and HEIF encoding round trips. Browser checks and their limitations are recorded in [tests/VALIDATION.md](tests/VALIDATION.md).
+The 29 tests cover pixel processing, camera/look stacking, curves/HSL, mask feathering and brush erasing, mask alignment across crop/rotation/straightening, custom export validation, zoom/pan boundaries, and HEIF encoding round trips. Browser checks and their limitations are recorded in [tests/VALIDATION.md](tests/VALIDATION.md).
 
 | File | Purpose |
 | --- | --- |
 | `app.js` | UI, import, edit history, preview, and export orchestration |
 | `engine.js` | Shared pixel processing and crop/export geometry |
+| `advanced.js` | Curves, HSL, mask rasterization, coordinate transforms, and custom sizing |
+| `advanced-ui.js` | Curves/color controls and mask drawing interactions |
 | `cameras.js` | Camera-inspired profile definitions |
 | `worker.js` | Background pixel processing |
 | `preview-zoom.js` | Editor/export zoom and pan |

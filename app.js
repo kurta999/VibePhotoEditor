@@ -1,9 +1,11 @@
 import { DEFAULTS, PRESETS, GROUPS, effectiveParams, cropRect, outputSize, processPixels } from './engine.js';
 import { CAMERAS } from './cameras.js';
 import { attachZoom } from './preview-zoom.js';
+import { freshColor, straightenScale, customOutputSize } from './advanced.js';
+import { setupAdvanced } from './advanced-ui.js';
 const $ = selector => document.querySelector(selector);
 const $$ = selector => [...document.querySelectorAll(selector)];
-const freshState = () => ({ preset: 'alpine', strength: 80, camera: null, cameraStrength: 75, adjustments: { ...DEFAULTS }, ratio: 'original', cropX: 50, cropY: 50, rotation: 0 });
+const freshState = () => ({ preset: 'alpine', strength: 80, camera: null, cameraStrength: 75, adjustments: { ...DEFAULTS }, color: freshColor(), masks: [], ratio: 'original', cropX: 50, cropY: 50, rotation: 0, straighten: 0 });
 let state = freshState();
 let source = null, rotated = null, sourceName = 'Alpine afternoon.png';
 let history = [], historyIndex = -1;
@@ -11,6 +13,7 @@ let previewVersion = 0, previewTimer, rendering = false, renderAgain = false;
 let loading = false, loadVersion = 0, toastTimer, exportVersion = 0, exportURL;
 let exportBlob = null, exportFilename = '', jobId = 0;
 let heifTask = null;
+let advancedUI, previewGeometry = null;
 const pendingJobs = new Map();
 let worker;
 try {
@@ -64,6 +67,7 @@ function syncControls() {
   $('#crop-position').hidden = state.ratio === 'original';
   $('#crop-x').value = state.cropX; $('#crop-y').value = state.cropY;
   fillRange($('#crop-x')); fillRange($('#crop-y'));
+  $('#straighten').value = state.straighten; $('#straighten-value').textContent = `${state.straighten > 0 ? '+' : ''}${state.straighten.toFixed(1)}°`; fillRange($('#straighten'));
   const preset = PRESETS.find(p => p.id === state.preset);
   $('#active-look-name').textContent = preset ? `Selected: ${preset.name}` : 'No creative look applied';
   const camera = CAMERAS.find(c => c.id === state.camera);
@@ -77,6 +81,7 @@ function syncControls() {
   $('#preview-status').textContent = styleNames.length ? `${styleNames.join(' + ')} · Live preview` : 'Original + your adjustments';
   $('#preview-status').title = $('#preview-status').textContent;
   updateHistory();
+  advancedUI?.sync();
 }
 for (const group of GROUPS) {
   const details = document.createElement('details'); details.className = 'slider-group'; details.open = group.name === 'Light';
@@ -134,12 +139,11 @@ for (const profile of CAMERAS) {
 }
 function cameraThumbnails() {
   if (!rotated) return;
-  const thumbnail = canvas(180, 126); const ctx = thumbnail.getContext('2d', { willReadFrequently: true });
-  const rect = cropRect(rotated.width, rotated.height, '10:7'); ctx.drawImage(rotated, rect.x, rect.y, rect.width, rect.height, 0, 0, 180, 126);
-  const pixels = ctx.getImageData(0, 0, 180, 126).data;
+  const thumbnail = makeFrame(state, 'thumbnail'); const ctx = thumbnail.getContext('2d', { willReadFrequently: true });
+  const pixels = ctx.getImageData(0, 0, thumbnail.width, thumbnail.height).data;
   for (const profile of CAMERAS) {
-    const params = effectiveParams({ ...state, camera: profile.id });
-    ctx.putImageData(new ImageData(processPixels(pixels, 180, 126, params), 180, 126), 0, 0);
+    const params = { ...effectiveParams({ ...state, camera: profile.id }), geometry: thumbnail.photoGeometry };
+    ctx.putImageData(new ImageData(processPixels(pixels, thumbnail.width, thumbnail.height, params), thumbnail.width, thumbnail.height), 0, 0);
     $(`[data-camera="${profile.id}"] img`).src = thumbnail.toDataURL('image/jpeg', .86);
   }
 }
@@ -158,14 +162,25 @@ function rebuildRotation() {
   const swap = state.rotation % 180 !== 0;
   rotated = canvas(swap ? source.height : source.width, swap ? source.width : source.height);
   const ctx = rotated.getContext('2d'); ctx.translate(rotated.width / 2, rotated.height / 2); ctx.rotate(state.rotation * Math.PI / 180); ctx.drawImage(source, -source.width / 2, -source.height / 2);
+  if (state.straighten) {
+    const oriented = rotated;
+    rotated = canvas(oriented.width, oriented.height);
+    const ctx = rotated.getContext('2d'), scale = straightenScale(oriented.width, oriented.height, state.straighten);
+    ctx.imageSmoothingQuality = 'high'; ctx.translate(rotated.width / 2, rotated.height / 2); ctx.rotate(state.straighten * Math.PI / 180); ctx.scale(scale, scale); ctx.drawImage(oriented, -oriented.width / 2, -oriented.height / 2);
+  }
+}
+function photoGeometry(snapshot, rect) {
+  return { sourceWidth: source.width, sourceHeight: source.height, width: rotated.width, height: rotated.height, rect, rotation: snapshot.rotation, straighten: snapshot.straighten };
 }
 function makeFrame(snapshot, size) {
   const rect = cropRect(rotated.width, rotated.height, snapshot.ratio, snapshot.cropX, snapshot.cropY);
-  const output = outputSize(rect.width, rect.height, size === 'preview' ? 'full' : size);
+  const output = size === 'custom' ? customOutputSize(rect.width, rect.height, Number($('#export-width').value), Number($('#export-height').value)) : outputSize(rect.width, rect.height, size === 'preview' ? 'full' : size);
   if (size === 'preview' && mainZoom.zoom === 'fit') { const scale = Math.min(1, 1400 / Math.max(output.width, output.height)); output.width = Math.max(1, Math.round(output.width * scale)); output.height = Math.max(1, Math.round(output.height * scale)); }
+  if (size === 'thumbnail') { const scale = Math.min(1, 180 / Math.max(output.width, output.height)); output.width = Math.max(1, Math.round(output.width * scale)); output.height = Math.max(1, Math.round(output.height * scale)); }
   const result = canvas(output.width, output.height);
   const ctx = result.getContext('2d', { willReadFrequently: true }); ctx.imageSmoothingQuality = 'high';
   ctx.drawImage(rotated, rect.x, rect.y, rect.width, rect.height, 0, 0, output.width, output.height);
+  result.photoGeometry = photoGeometry(snapshot, rect);
   return result;
 }
 function requestPreview() {
@@ -181,13 +196,15 @@ async function renderPreview() {
   try {
     const frame = makeFrame(state, 'preview');
     const data = frame.getContext('2d').getImageData(0, 0, frame.width, frame.height);
-    const edited = await pixelsInWorker(data, effectiveParams(state));
+    const edited = await pixelsInWorker(data, { ...effectiveParams(state), geometry: frame.photoGeometry });
     if (version !== previewVersion) return;
     const preview = $('#preview'), original = $('#original');
     preview.width = original.width = frame.width; preview.height = original.height = frame.height;
     original.getContext('2d').drawImage(frame, 0, 0);
     preview.getContext('2d').putImageData(edited, 0, 0);
+    previewGeometry = frame.photoGeometry;
     fitPhoto();
+    advancedUI.drawOverlay(); updateGuides();
   } catch (error) { toast(error.message || 'The preview could not be rendered. Try a smaller photo.'); }
   finally { rendering = false; $('#processing').hidden = true; if (renderAgain || version !== previewVersion) renderPreview(); }
 }
@@ -213,25 +230,35 @@ function updateComparison() {
   $('#original-overlay').style.clipPath = `inset(0 ${100 - position}% 0 0)`; $('#split-line').style.left = `${position}%`;
   $('#compare').setAttribute('aria-pressed', compareOn);
 }
-$('#compare').addEventListener('click', () => { compareOn = !compareOn; updateComparison(); });
+$('#compare').addEventListener('click', () => { advancedUI.stopDrawing(); compareOn = !compareOn; updateComparison(); });
 $('#comparison').addEventListener('input', updateComparison);
 $$('.crop-options button').forEach(button => button.addEventListener('click', () => { state.ratio = button.dataset.ratio; state.cropX = state.cropY = 50; syncControls(); checkpoint(); requestPreview(); }));
 for (const axis of ['x', 'y']) {
   $(`#crop-${axis}`).addEventListener('input', () => { state[axis === 'x' ? 'cropX' : 'cropY'] = Number($(`#crop-${axis}`).value); fillRange($(`#crop-${axis}`)); requestPreview(); });
   $(`#crop-${axis}`).addEventListener('change', checkpoint);
 }
+function updateGuides() {
+  const guide = $('#crop-guides').value, svg = $('#crop-guide-overlay');
+  const lines = guide === 'thirds' ? [100 / 3, 200 / 3] : guide === 'grid' ? [10, 20, 30, 40, 50, 60, 70, 80, 90] : [];
+  svg.innerHTML = lines.map(p => `<path d="M ${p} 0 V 100 M 0 ${p} H 100"/>`).join(''); svg.toggleAttribute('hidden', !lines.length);
+}
+$('#crop-guides').addEventListener('change', updateGuides);
+$('#straighten').addEventListener('input', () => { state.straighten = Number($('#straighten').value); rebuildRotation(); $('#straighten-value').textContent = `${state.straighten > 0 ? '+' : ''}${state.straighten.toFixed(1)}°`; fillRange($('#straighten')); requestPreview(); });
+$('#straighten').addEventListener('change', checkpoint);
+$('#straighten-reset').addEventListener('click', () => { state.straighten = 0; rebuildRotation(); syncControls(); checkpoint(); requestPreview(); });
 $('#rotate').addEventListener('click', () => { state.rotation = (state.rotation + 90) % 360; state.cropX = state.cropY = 50; rebuildRotation(); syncControls(); checkpoint(); requestPreview(); });
 function restoreHistory(offset) {
+  if (advancedUI.stopDrawing()) return;
   const next = historyIndex + offset; if (next < 0 || next >= history.length) return;
-  const oldRotation = state.rotation; historyIndex = next; state = JSON.parse(history[historyIndex]);
-  if (oldRotation !== state.rotation) rebuildRotation(); syncControls(); requestPreview();
+  const oldRotation = state.rotation, oldStraighten = state.straighten; historyIndex = next; state = JSON.parse(history[historyIndex]);
+  if (oldRotation !== state.rotation || oldStraighten !== state.straighten) rebuildRotation(); syncControls(); requestPreview();
 }
 $('#undo').addEventListener('click', () => restoreHistory(-1)); $('#redo').addEventListener('click', () => restoreHistory(1));
 document.addEventListener('keydown', event => {
   if ($('#export-dialog').open || $('#camera-dialog').open || /INPUT|SELECT|TEXTAREA/.test(event.target.tagName)) return;
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') { event.preventDefault(); restoreHistory(event.shiftKey ? 1 : -1); }
 });
-$('#reset').addEventListener('click', () => { state = { ...freshState(), preset: null, strength: 0 }; rebuildRotation(); syncControls(); checkpoint(); requestPreview(); toast('Back to your original. You can undo this anytime.'); });
+$('#reset').addEventListener('click', () => { advancedUI.stopDrawing(); state = { ...freshState(), preset: null, strength: 0 }; rebuildRotation(); syncControls(); checkpoint(); requestPreview(); toast('Back to your original. You can undo this anytime.'); });
 $('#auto').addEventListener('click', () => {
   if (!source) return;
   const sample = canvas(100, 100); const ctx = sample.getContext('2d'); ctx.drawImage(source, 0, 0, 100, 100);
@@ -263,6 +290,7 @@ async function loadPhoto(blob, name, sample = false) {
     const scale = Math.min(1, Math.sqrt(16000000 / (nativeW * nativeH)), 8192 / Math.max(nativeW, nativeH));
     const nextSource = canvas(Math.max(1, Math.floor(nativeW * scale)), Math.max(1, Math.floor(nativeH * scale)));
     const ctx = nextSource.getContext('2d'); ctx.imageSmoothingQuality = 'high'; ctx.drawImage(bitmap, 0, 0, nextSource.width, nextSource.height); bitmap.close();
+    advancedUI.stopDrawing(); previewGeometry = null;
     source = nextSource; sourceName = name; state = freshState(); history = []; historyIndex = -1; mainZoom.reset();
     rebuildRotation(); checkpoint(); syncControls();
     $('#filename').textContent = name;
@@ -313,19 +341,20 @@ function encodeHeifInWorker(frame) {
   });
 }
 async function prepareExport() {
-  if (!source) return;
+  if (!source || !$('#export-dialog').open) return;
   const version = ++exportVersion; exportBlob = null;
   cancelHeif();
   $('#download').disabled = true; $('#share').hidden = true; $('#export-meta').textContent = 'Preparing your photo…';
   $('#quality-wrap').hidden = exportFormat() !== 'image/jpeg';
   $('#heif-hint').hidden = exportFormat() !== 'image/heif';
+  $('#custom-size').hidden = $('#export-size').value !== 'custom';
   $('#quality-value').textContent = `${$('#quality').value}%`; fillRange($('#quality'));
   try {
     const snapshot = structuredClone(state);
     const type = exportFormat(), quality = Number($('#quality').value) / 100;
     const frame = makeFrame(snapshot, $('#export-size').value);
     const ctx = frame.getContext('2d');
-    const result = await pixelsInWorker(ctx.getImageData(0, 0, frame.width, frame.height), effectiveParams(snapshot));
+    const result = await pixelsInWorker(ctx.getImageData(0, 0, frame.width, frame.height), { ...effectiveParams(snapshot), geometry: frame.photoGeometry });
     if (version !== exportVersion || !$('#export-dialog').open) return;
     ctx.putImageData(result, 0, 0);
     if (type !== 'image/png') { ctx.globalCompositeOperation = 'destination-over'; ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, frame.width, frame.height); }
@@ -346,15 +375,27 @@ async function prepareExport() {
     $('#download').disabled = false;
     const file = new File([blob], exportFilename, { type });
     $('#share').hidden = !navigator.canShare?.({ files: [file] });
-  } catch (error) { if (version === exportVersion) { $('#export-meta').textContent = 'Export failed. Try a smaller image size.'; toast(error.message); } }
+  } catch (error) { if (version === exportVersion) { $('#export-meta').textContent = error.message || 'Export failed. Try a smaller image size.'; toast(error.message); } }
 }
 $('#export-open').addEventListener('click', () => {
   if (!source || loading) return;
+  advancedUI.stopDrawing();
+  const rect = cropRect(rotated.width, rotated.height, state.ratio, state.cropX, state.cropY), size = outputSize(rect.width, rect.height, 'instagram');
+  $('#export-width').value = size.width; $('#export-height').value = size.height;
+  $('#export-width').max = Math.round(rect.width); $('#export-height').max = Math.round(rect.height);
+  $('#custom-size-hint').textContent = `Aspect ratio stays linked. Maximum ${Math.round(rect.width).toLocaleString()} × ${Math.round(rect.height).toLocaleString()} px. Choose a different crop to change the ratio.`;
   $('#export-dialog').showModal(); exportZoom.reset(); $('#export-preview').src = $('#preview').toDataURL('image/jpeg', .85); prepareExport();
 });
-$('#export-dialog').addEventListener('close', () => { exportVersion++; exportBlob = null; cancelHeif(); if (exportURL) { URL.revokeObjectURL(exportURL); exportURL = null; } });
+$('#export-dialog').addEventListener('close', () => { exportVersion++; exportBlob = null; clearTimeout(customTimer); clearTimeout(qualityTimer); cancelHeif(); if (exportURL) { URL.revokeObjectURL(exportURL); exportURL = null; } });
 $('#export-dialog').addEventListener('click', event => { if (event.target === $('#export-dialog')) { const rect = event.target.getBoundingClientRect(); if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) event.target.close(); } });
 $$('input[name=format]').forEach(input => input.addEventListener('change', prepareExport)); $('#export-size').addEventListener('change', prepareExport);
+let customTimer;
+for (const axis of ['width', 'height']) $(`#export-${axis}`).addEventListener('input', () => {
+  exportVersion++; exportBlob = null; cancelHeif(); $('#download').disabled = true; $('#share').hidden = true;
+  const rect = cropRect(rotated.width, rotated.height, state.ratio, state.cropX, state.cropY), value = Number($(`#export-${axis}`).value);
+  if (value > 0 && Number.isFinite(value)) $(`#export-${axis === 'width' ? 'height' : 'width'}`).value = Math.max(1, Math.round(value * (axis === 'width' ? rect.height / rect.width : rect.width / rect.height)));
+  $('#export-meta').textContent = 'Preparing custom dimensions…'; clearTimeout(customTimer); customTimer = setTimeout(prepareExport, 250);
+});
 let qualityTimer;
 $('#quality').addEventListener('input', () => { exportVersion++; exportBlob = null; $('#download').disabled = true; $('#share').hidden = true; $('#quality-value').textContent = `${$('#quality').value}%`; fillRange($('#quality')); clearTimeout(qualityTimer); qualityTimer = setTimeout(prepareExport, 180); });
 $('#download').addEventListener('click', () => {
@@ -366,7 +407,12 @@ $('#share').addEventListener('click', async () => {
   try { await navigator.share({ files: [new File([exportBlob], exportFilename, { type: exportBlob.type })], title: 'My Vibe photo' }); }
   catch (error) { if (error.name !== 'AbortError') toast('Sharing is unavailable here. Save the photo instead.'); }
 });
-syncControls(); updateComparison(); $('#export-open').disabled = true;
+advancedUI = setupAdvanced({ getState: () => state, geometry: () => previewGeometry, changed: commit => { if (commit) checkpoint(); requestPreview(); }, notify: toast, onDraw: drawing => { if (drawing) { compareOn = false; updateComparison(); } } });
+for (const details of $$('.slider-group')) details.addEventListener('toggle', () => {
+  if (details.open) $$('.slider-group').forEach(other => { if (other !== details) other.open = false; });
+  if (details.id === 'masks-panel' && !details.open) advancedUI.stopDrawing();
+});
+syncControls(); updateComparison(); updateGuides(); $('#export-open').disabled = true;
 try {
   const response = await fetch('./assets/alpine-original.png'); if (!response.ok) throw new Error('Sample not found');
   await loadPhoto(await response.blob(), sourceName, true);
